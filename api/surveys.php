@@ -57,11 +57,15 @@ switch ($method) {
     case 'DELETE':
         $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
         if (!$id) sendError('ID is required');
-        $db->query("DELETE FROM survey_responses WHERE survey_id=$id");
+        $check = $db->prepare("SELECT COUNT(*) as cnt FROM survey_responses WHERE survey_id=?");
+        $check->bind_param('i', $id);
+        $check->execute();
+        $cnt = $check->get_result()->fetch_assoc()['cnt'];
+        if ($cnt > 0) sendError('Cannot delete: survey has associated responses. Delete responses first.');
         $stmt = $db->prepare("DELETE FROM surveys WHERE survey_id=?");
         $stmt->bind_param('i', $id);
         if (!$stmt->execute()) sendError('Failed to delete survey');
-        sendSuccess([], 'Survey and its responses deleted successfully');
+        sendSuccess([], 'Survey deleted successfully');
         break;
 
     default:
