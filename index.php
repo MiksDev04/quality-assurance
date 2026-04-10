@@ -398,7 +398,7 @@ function downloadTextFile(filename, content, mimeType) {
 
 function exportReportCsv() {
   if (!reportExportData) { toast('Report is still loading', 'info'); return; }
-  const { indicators, surveys, responses, generatedAt } = reportExportData;
+  const { indicators, surveys, responses, records, generatedAt } = reportExportData;
 
   // Calculate survey ratings
   const surveyRatings = {};
@@ -416,9 +416,22 @@ function exportReportCsv() {
     ? (responses.filter(r => r.rating).reduce((sum, r) => sum + parseFloat(r.rating), 0) / ratedResponses).toFixed(2)
     : '—';
 
-  const met = indicators.filter(i => reportStatusText(i.latest_value, i.target_value) === 'Met').length;
-  const unmet = indicators.filter(i => reportStatusText(i.latest_value, i.target_value) === 'Below Target').length;
-  const noData = indicators.filter(i => reportStatusText(i.latest_value, i.target_value) === 'No Data').length;
+  const met = indicators.filter(i => {
+    const indRecords = records.filter(r => r.indicator_id === i.indicator_id);
+    if (indRecords.length === 0) return false;
+    const latest = indRecords.reduce((prev, current) => (parseInt(current.year) > parseInt(prev.year)) ? current : prev);
+    return parseFloat(latest.actual_value) >= parseFloat(i.target_value);
+  }).length;
+  const unmet = indicators.filter(i => {
+    const indRecords = records.filter(r => r.indicator_id === i.indicator_id);
+    if (indRecords.length === 0) return false;
+    const latest = indRecords.reduce((prev, current) => (parseInt(current.year) > parseInt(prev.year)) ? current : prev);
+    return parseFloat(latest.actual_value) < parseFloat(i.target_value);
+  }).length;
+  const noData = indicators.filter(i => {
+    const indRecords = records.filter(r => r.indicator_id === i.indicator_id);
+    return indRecords.length === 0;
+  }).length;
 
   const lines = [];
 
@@ -446,18 +459,21 @@ function exportReportCsv() {
   lines.push([`Average Rating (out of 5)`, avgRating].map(csvEscape).join(','));
   lines.push('');
 
-  // KPI Performance Summary
+  // KPI Performance Summary - now using filtered records
   lines.push('"KPI PERFORMANCE SUMMARY"');
   lines.push(['Indicator','Description','Target (%)','Actual (%)','Year','Status'].map(csvEscape).join(','));
-  indicators.forEach(i => {
-    lines.push([
-      i.name,
-      i.description || '',
-      parseFloat(i.target_value).toFixed(2),
-      i.latest_value ? parseFloat(i.latest_value).toFixed(2) : '',
-      i.latest_year || '',
-      reportStatusText(i.latest_value, i.target_value)
-    ].map(csvEscape).join(','));
+  records.forEach(r => {
+    const indicator = indicators.find(i => i.indicator_id === r.indicator_id);
+    if (indicator) {
+      lines.push([
+        indicator.name,
+        indicator.description || '',
+        parseFloat(indicator.target_value).toFixed(2),
+        parseFloat(r.actual_value).toFixed(2),
+        r.year,
+        parseFloat(r.actual_value) >= parseFloat(indicator.target_value) ? 'Met' : 'Below Target'
+      ].map(csvEscape).join(','));
+    }
   });
   lines.push('');
 
@@ -499,16 +515,42 @@ function exportReportPdf() {
   const element = document.createElement('div');
   element.innerHTML = reportNode.innerHTML;
 
+  // Add formal styling for PDF
+  const style = document.createElement('style');
+  style.innerHTML = `
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    .card { page-break-inside: avoid; border: none; }
+    h3, h5 { page-break-after: avoid; }
+    table { page-break-inside: avoid; border-collapse: collapse; width: 100%; }
+    thead { background-color: #f8f9fa !important; }
+    tr { page-break-inside: avoid; }
+    td, th { padding: 10px; border: 1px solid #dee2e6; }
+    .row { page-break-inside: avoid; }
+    .overflow-hidden { overflow: visible !important; }
+    .table-responsive { page-break-inside: avoid; }
+    div[style*="border-bottom"] { page-break-after: avoid; }
+  `;
+  element.appendChild(style);
+
   const opt = {
-    margin: 10,
+    margin: [15, 15, 15, 15],
     filename: 'qa-report.pdf',
     image: { type: 'jpeg', quality: 0.98 },
-    html2canvas: { scale: 2 },
-    jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
+    html2canvas: { scale: 2, useCORS: true, allowTaint: true },
+    jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' },
+    pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
   };
 
-  html2pdf().set(opt).from(element).save();
-  toast('✓ PDF report downloaded successfully!', 'success');
+  html2pdf().set(opt).from(element).output('blob').then(blob => {
+    const url = URL.createObjectURL(blob);
+    const newWindow = window.open(url, '_blank');
+    if (newWindow) {
+      setTimeout(() => newWindow.print(), 500);
+      toast('✓ PDF opened for preview', 'success');
+    } else {
+      toast('Could not open print window. Please check if pop-ups are blocked.', 'error');
+    }
+  });
 }
 
 // ===== PAGES =====
@@ -1568,16 +1610,31 @@ function render_report() {
   `);
   
   // Set default dates (current year)
+  function formatLocalDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  
   const today = new Date();
   const startOfYear = new Date(today.getFullYear(), 0, 1);
-  $('#reportFilterFromDate').val(startOfYear.toISOString().split('T')[0]);
-  $('#reportFilterToDate').val(today.toISOString().split('T')[0]);
+  $('#reportFilterFromDate').val(formatLocalDate(startOfYear));
+  $('#reportFilterToDate').val(formatLocalDate(today));
   
   // Event handlers for filters
   $('#reportGenerateBtn').on('click', generateReport);
   $('#reportClearFiltersBtn').on('click', function() {
-    $('#reportFilterFromDate').val('');
-    $('#reportFilterToDate').val('');
+    function formatLocalDate(date) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    const today = new Date();
+    const startOfYear = new Date(today.getFullYear(), 0, 1);
+    $('#reportFilterFromDate').val(formatLocalDate(startOfYear));
+    $('#reportFilterToDate').val(formatLocalDate(today));
     generateReport();
   });
   
@@ -1640,11 +1697,19 @@ function generateReport() {
     });
 
     const generatedAt = new Date().toLocaleDateString('en-US', {year:'numeric',month:'long',day:'numeric'});
-    reportExportData = { indicators: updatedIndicators, surveys: filteredSurveys, responses: filteredResponses, generatedAt };
+    reportExportData = { indicators: updatedIndicators, surveys: filteredSurveys, responses: filteredResponses, records: filteredRecords, generatedAt };
 
-    const met = updatedIndicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) >= parseFloat(i.target_value)).length;
-    const unmet = updatedIndicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) < parseFloat(i.target_value)).length;
-    const noData = updatedIndicators.filter(i => i.latest_value === null || i.latest_value === '').length;
+    // Calculate metrics based on actual filtered records
+    const totalKPIs = filteredRecords.length;
+    const met = filteredRecords.filter(r => {
+      const indicator = updatedIndicators.find(i => i.indicator_id === r.indicator_id);
+      return indicator && parseFloat(r.actual_value) >= parseFloat(indicator.target_value);
+    }).length;
+    const unmet = filteredRecords.filter(r => {
+      const indicator = updatedIndicators.find(i => i.indicator_id === r.indicator_id);
+      return indicator && parseFloat(r.actual_value) < parseFloat(indicator.target_value);
+    }).length;
+    const noData = 0; // All filtered records have data
 
     // Calculate survey metrics
     const totalResponses = filteredResponses.length;
@@ -1662,14 +1727,17 @@ function generateReport() {
       if (resp.rating) surveyRatings[resp.survey_id].ratings.push(parseFloat(resp.rating));
     });
 
-    let indRows = updatedIndicators.map(i => `
-      <tr>
-        <td><strong>${i.name}</strong><br><small class="text-muted">${(i.description || '—').substring(0, 50)}</small></td>
-        <td>${parseFloat(i.target_value).toFixed(2)}%</td>
-        <td><strong>${i.latest_value ? parseFloat(i.latest_value).toFixed(2)+'%' : '—'}</strong></td>
-        <td>${i.latest_year || '—'}</td>
-        <td>${statusBadge(i.latest_value, i.target_value)}</td>
-      </tr>`).join('');
+    let indRows = filteredRecords.map(r => {
+      const indicator = updatedIndicators.find(i => i.indicator_id === r.indicator_id);
+      if (!indicator) return '';
+      return `<tr>
+        <td><strong>${indicator.name}</strong><br><small class="text-muted">${(indicator.description || '—').substring(0, 50)}</small></td>
+        <td>${parseFloat(indicator.target_value).toFixed(2)}%</td>
+        <td><strong>${parseFloat(r.actual_value).toFixed(2)}%</strong></td>
+        <td>${r.year}</td>
+        <td>${statusBadge(r.actual_value, indicator.target_value)}</td>
+      </tr>`;
+    }).join('');
 
     let srvRows = filteredSurveys.map(s => {
       const avgRating = surveyRatings[s.survey_id] && surveyRatings[s.survey_id].ratings.length > 0
@@ -1683,8 +1751,18 @@ function generateReport() {
       </tr>`;
     }).join('');
 
-    const displayFromDate = fromDate || new Date().toISOString().split('T')[0];
-    const displayToDate = toDate || new Date().toISOString().split('T')[0];
+    // Helper function to format local date
+    function formatLocalDate(date) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    
+    const today = new Date();
+    const startOfYear = new Date(today.getFullYear(), 0, 1);
+    const displayFromDate = fromDate || formatLocalDate(startOfYear);
+    const displayToDate = toDate || formatLocalDate(today);
     
     $('#report-content').html(`
       <div class="card p-4">
@@ -1697,7 +1775,7 @@ function generateReport() {
         <div class="row g-3 mb-4">
           <div class="col-md-3">
             <div class="text-center p-3" style="background:#f8f9fa; border-radius:8px; border: 1px solid #dee2e6;">
-              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${updatedIndicators.length}</div>
+              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${totalKPIs}</div>
               <small class="text-muted d-block">Total KPIs</small>
             </div>
           </div>
@@ -1785,7 +1863,7 @@ function generateReport() {
         </div>
 
         <div class="mt-4 pt-3 border-top" style="font-size:0.95rem; color:#6c757d; line-height:1.6;">
-          <small><strong>Report Summary:</strong> This comprehensive Quality Assurance report presents key performance metrics across two dimensions: KPI achievement against institutional targets and stakeholder satisfaction through survey feedback. The KPI section shows ${updatedIndicators.length} total indicators with ${met} meeting targets (${updatedIndicators.length > 0 ? Math.round((met/updatedIndicators.length)*100) : 0}% achievement rate), while the survey section captures feedback from ${filteredSurveys.length} surveys with ${totalResponses} responses and an overall satisfaction rating of ${avgRating}/5.0.</small>
+          <small><strong>Report Summary:</strong> This comprehensive Quality Assurance report presents key performance metrics across two dimensions: KPI achievement against institutional targets and stakeholder satisfaction through survey feedback. The KPI section shows ${totalKPIs} total indicators with ${met} meeting targets (${totalKPIs > 0 ? Math.round((met/totalKPIs)*100) : 0}% achievement rate), while the survey section captures feedback from ${filteredSurveys.length} surveys with ${totalResponses} responses and an overall satisfaction rating of ${avgRating}/5.0.</small>
         </div>
       </div>
     `);
