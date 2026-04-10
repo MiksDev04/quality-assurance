@@ -1539,8 +1539,58 @@ function render_report() {
         <button class="btn btn-primary" onclick="exportReportPdf()"><i class="fa-solid fa-file-pdf me-2"></i>PDF</button>
       </div>
     </div>
+    
+    <div class="card mb-4">
+      <div class="card-header">
+        <div class="mb-2">
+          <span class="fw-semibold">Filter Report by Date</span>
+        </div>
+        <div class="row g-2 align-items-end">
+          <div class="col-12 col-md-3">
+            <label class="form-label small text-muted mb-1">From Date:</label>
+            <input type="date" class="form-control" id="reportFilterFromDate">
+          </div>
+          <div class="col-12 col-md-3">
+            <label class="form-label small text-muted mb-1">To Date:</label>
+            <input type="date" class="form-control" id="reportFilterToDate">
+          </div>
+          <div class="col-6 col-md-2">
+            <button class="btn btn-sm btn-primary w-100" id="reportGenerateBtn">Generate Report</button>
+          </div>
+          <div class="col-6 col-md-2">
+            <button class="btn btn-sm btn-outline-secondary w-100" id="reportClearFiltersBtn">Clear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    
     <div id="report-content"><div class="text-center text-muted py-5"><i class="fa-solid fa-spinner fa-spin"></i></div></div>
   `);
+  
+  // Set default dates (current year)
+  const today = new Date();
+  const startOfYear = new Date(today.getFullYear(), 0, 1);
+  $('#reportFilterFromDate').val(startOfYear.toISOString().split('T')[0]);
+  $('#reportFilterToDate').val(today.toISOString().split('T')[0]);
+  
+  // Event handlers for filters
+  $('#reportGenerateBtn').on('click', generateReport);
+  $('#reportClearFiltersBtn').on('click', function() {
+    $('#reportFilterFromDate').val('');
+    $('#reportFilterToDate').val('');
+    generateReport();
+  });
+  
+  // Generate initial report
+  generateReport();
+}
+
+function generateReport() {
+  const fromDate = $('#reportFilterFromDate').val();
+  const toDate = $('#reportFilterToDate').val();
+  
+  $('#report-content').html(`<div class="text-center text-muted py-5"><i class="fa-solid fa-spinner fa-spin"></i></div>`);
+  
   Promise.all([
     new Promise(r => apiGet('indicators.php', r)),
     new Promise(r => apiGet('records.php', r)),
@@ -1548,30 +1598,71 @@ function render_report() {
     new Promise(r => apiGet('responses.php', r)),
     new Promise(r => apiGet('dashboard.php', r))
   ]).then(([indicators, records, surveys, responses, dash]) => {
-    const generatedAt = new Date().toLocaleDateString('en-US', {year:'numeric',month:'long',day:'numeric'});
-    reportExportData = { indicators, surveys, responses, generatedAt };
+    // Filter data by date range
+    const filteredRecords = records.filter(r => {
+      if (!fromDate && !toDate) return true;
+      // Convert year to comparable format (assuming year is available, compare as string or timestamp)
+      if (fromDate && r.year < fromDate.substring(0,4)) return false;
+      if (toDate && r.year > toDate.substring(0,4)) return false;
+      return true;
+    });
 
-    const met = indicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) >= parseFloat(i.target_value)).length;
-    const unmet = indicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) < parseFloat(i.target_value)).length;
-    const noData = indicators.filter(i => i.latest_value === null || i.latest_value === '').length;
+    const filteredSurveys = surveys.filter(s => {
+      if (!fromDate && !toDate) return true;
+      const sDate = s.created_date || '';
+      if (fromDate && sDate < fromDate) return false;
+      if (toDate && sDate > toDate) return false;
+      return true;
+    });
+
+    const filteredResponses = responses.filter(r => {
+      if (!fromDate && !toDate) return true;
+      const rDate = r.response_date || '';
+      if (fromDate && rDate < fromDate) return false;
+      if (toDate && rDate > toDate) return false;
+      return true;
+    });
+
+    // Update indicators with filtered latest values based on filtered records
+    const updatedIndicators = indicators.map(ind => {
+      const filteredRecordsForInd = filteredRecords.filter(r => r.indicator_id === ind.indicator_id);
+      if (filteredRecordsForInd.length > 0) {
+        const latest = filteredRecordsForInd.reduce((prev, current) => 
+          (parseInt(current.year) > parseInt(prev.year)) ? current : prev
+        );
+        return {
+          ...ind,
+          latest_value: latest.actual_value,
+          latest_year: latest.year
+        };
+      }
+      return ind;
+    });
+
+    const generatedAt = new Date().toLocaleDateString('en-US', {year:'numeric',month:'long',day:'numeric'});
+    reportExportData = { indicators: updatedIndicators, surveys: filteredSurveys, responses: filteredResponses, generatedAt };
+
+    const met = updatedIndicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) >= parseFloat(i.target_value)).length;
+    const unmet = updatedIndicators.filter(i => i.latest_value !== null && parseFloat(i.latest_value) < parseFloat(i.target_value)).length;
+    const noData = updatedIndicators.filter(i => i.latest_value === null || i.latest_value === '').length;
 
     // Calculate survey metrics
-    const totalResponses = responses.length;
-    const ratedResponses = responses.filter(r => r.rating).length;
+    const totalResponses = filteredResponses.length;
+    const ratedResponses = filteredResponses.filter(r => r.rating).length;
     const avgRating = ratedResponses > 0
-      ? (responses.filter(r => r.rating).reduce((sum, r) => sum + parseFloat(r.rating), 0) / ratedResponses).toFixed(2)
+      ? (filteredResponses.filter(r => r.rating).reduce((sum, r) => sum + parseFloat(r.rating), 0) / ratedResponses).toFixed(2)
       : '—';
 
     // Calculate survey ratings by survey
     const surveyRatings = {};
-    responses.forEach(resp => {
+    filteredResponses.forEach(resp => {
       if (!surveyRatings[resp.survey_id]) {
         surveyRatings[resp.survey_id] = { ratings: [] };
       }
       if (resp.rating) surveyRatings[resp.survey_id].ratings.push(parseFloat(resp.rating));
     });
 
-    let indRows = indicators.map(i => `
+    let indRows = updatedIndicators.map(i => `
       <tr>
         <td><strong>${i.name}</strong><br><small class="text-muted">${(i.description || '—').substring(0, 50)}</small></td>
         <td>${parseFloat(i.target_value).toFixed(2)}%</td>
@@ -1580,7 +1671,7 @@ function render_report() {
         <td>${statusBadge(i.latest_value, i.target_value)}</td>
       </tr>`).join('');
 
-    let srvRows = surveys.map(s => {
+    let srvRows = filteredSurveys.map(s => {
       const avgRating = surveyRatings[s.survey_id] && surveyRatings[s.survey_id].ratings.length > 0
         ? (surveyRatings[s.survey_id].ratings.reduce((a, b) => a + b) / surveyRatings[s.survey_id].ratings.length).toFixed(2)
         : '—';
@@ -1592,18 +1683,21 @@ function render_report() {
       </tr>`;
     }).join('');
 
+    const displayFromDate = fromDate || new Date().toISOString().split('T')[0];
+    const displayToDate = toDate || new Date().toISOString().split('T')[0];
+    
     $('#report-content').html(`
       <div class="card p-4">
         <div class="text-center mb-4 pb-3 border-bottom">
           <h3 class="mb-2">Quality Assurance Management System Report</h3>
-          <small class="text-muted">Generated: ${generatedAt}</small>
+          <small class="text-muted">Generated: ${generatedAt}<br>Period: ${displayFromDate} to ${displayToDate}</small>
         </div>
 
         <h5 class="mb-3 fw-bold">KPI Performance Overview</h5>
         <div class="row g-3 mb-4">
           <div class="col-md-3">
             <div class="text-center p-3" style="background:#f8f9fa; border-radius:8px; border: 1px solid #dee2e6;">
-              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${indicators.length}</div>
+              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${updatedIndicators.length}</div>
               <small class="text-muted d-block">Total KPIs</small>
             </div>
           </div>
@@ -1631,7 +1725,7 @@ function render_report() {
         <div class="row g-3 mb-4">
           <div class="col-md-3">
             <div class="text-center p-3" style="background:#f8f9fa; border-radius:8px; border: 1px solid #dee2e6;">
-              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${surveys.length}</div>
+              <div style="font-size:2.5rem; font-weight:bold; color:#0d6efd">${filteredSurveys.length}</div>
               <small class="text-muted d-block">Total Surveys</small>
             </div>
           </div>
@@ -1691,7 +1785,7 @@ function render_report() {
         </div>
 
         <div class="mt-4 pt-3 border-top" style="font-size:0.95rem; color:#6c757d; line-height:1.6;">
-          <small><strong>Report Summary:</strong> This comprehensive Quality Assurance report presents key performance metrics across two dimensions: KPI achievement against institutional targets and stakeholder satisfaction through survey feedback. The KPI section shows ${indicators.length} total indicators with ${met} meeting targets (${Math.round((met/indicators.length)*100)}% achievement rate), while the survey section captures feedback from ${surveys.length} surveys with ${totalResponses} responses and an overall satisfaction rating of ${avgRating}/5.0.</small>
+          <small><strong>Report Summary:</strong> This comprehensive Quality Assurance report presents key performance metrics across two dimensions: KPI achievement against institutional targets and stakeholder satisfaction through survey feedback. The KPI section shows ${updatedIndicators.length} total indicators with ${met} meeting targets (${updatedIndicators.length > 0 ? Math.round((met/updatedIndicators.length)*100) : 0}% achievement rate), while the survey section captures feedback from ${filteredSurveys.length} surveys with ${totalResponses} responses and an overall satisfaction rating of ${avgRating}/5.0.</small>
         </div>
       </div>
     `);
